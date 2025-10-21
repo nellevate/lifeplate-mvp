@@ -41,6 +41,127 @@ function setLS(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
     // fail safe: never block the app
   }
 })();
+// -------- DATA RESCUE (legacy localStorage migration) --------
+function safeParseJSON(str) {
+  try { return JSON.parse(str); } catch { return null; }
+}
+
+// Heuristically detect arrays of "task-like" objects
+function looksLikeTaskArray(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return false;
+  // task is object with at least a title or name-ish
+  const sample = arr.find(x => x && typeof x === 'object');
+  if (!sample) return false;
+  const hasTitle = typeof sample.title === 'string' && sample.title.trim().length > 0;
+  const hasName = typeof sample.name === 'string' && sample.name.trim().length > 0;
+  return hasTitle || hasName;
+}
+
+// Normalize various legacy shapes into current task shape
+function normalizeTask(t) {
+  if (!t || typeof t !== 'object') return null;
+  const title = (t.title || t.name || "").toString().trim();
+  if (!title) return null;
+
+  const category = (t.category || t.segment || t.type || "Personal").toString().trim();
+  const energy = (t.energy || t.energyLevel || t.moodEnergy || "").toString().trim();
+  const duration = (typeof t.duration === 'number') ? t.duration
+                 : (typeof t.estimateMin === 'number') ? t.estimateMin
+                 : (typeof t.time === 'number') ? t.time
+                 : null;
+  const location = (t.location || t.place || t.where || "").toString().trim() || null;
+  const tags = Array.isArray(t.tags) ? t.tags
+             : typeof t.tags === 'string' ? t.tags.split(',').map(s=>s.trim()).filter(Boolean)
+             : [];
+  const createdAt = t.createdAt || t.created || t.timestamp || Date.now();
+  const id = t.id || t._id || `${title}-${createdAt}`;
+
+  return {
+    id: String(id),
+    title,
+    category,
+    duration: (typeof duration === 'number' && duration > 0) ? duration : null,
+    energy: energy || null,
+    location,
+    tags,
+    notes: t.notes || null,
+    createdAt: createdAt
+  };
+}
+
+// Scan ALL localStorage keys to find legacy task arrays
+function findLegacyTaskArrays() {
+  const results = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+
+    // Skip current profile store keys to avoid re-importing
+    if (key && (key.startsWith('lp_data_') || key === 'lp_profiles' || key === 'lp_activeProfileId')) continue;
+
+    const raw = localStorage.getItem(key);
+    const parsed = safeParseJSON(raw);
+    if (looksLikeTaskArray(parsed)) {
+      results.push({ key, tasks: parsed });
+    }
+  }
+  return results;
+}
+
+// Merge legacy tasks into the current active profile without duplicates
+function mergeTasksIntoActive(legacyTasks) {
+  const normalized = legacyTasks.map(normalizeTask).filter(Boolean);
+  if (!normalized.length) return { added: 0, skipped: 0 };
+
+  // Load current tasks
+  const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
+  const storeKey = 'lp_data_' + activeId;
+  const current = safeParseJSON(localStorage.getItem(storeKey)) || { tasks: [], categories: [] };
+  const currentTasks = Array.isArray(current.tasks) ? current.tasks : [];
+
+  // Use a set of signatures (id OR title+createdAt) for dedupe
+  const sig = (t) => t.id ? `id:${t.id}` : `tc:${t.title}|${t.createdAt}`;
+  const seen = new Set(currentTasks.map(sig));
+
+  let added = 0, skipped = 0;
+  normalized.forEach(t => {
+    const s = sig(t);
+    if (seen.has(s)) { skipped++; return; }
+    currentTasks.push(t);
+    seen.add(s); added++;
+  });
+
+  // update categories with any unseen categories
+  const catSet = new Set(Array.isArray(current.categories) ? current.categories : []);
+  currentTasks.forEach(t => { if (t.category) catSet.add(t.category); });
+  current.tasks = currentTasks;
+  current.categories = Array.from(catSet);
+
+  localStorage.setItem(storeKey, JSON.stringify(current));
+  return { added, skipped };
+}
+
+// One-click rescue: scan keys → let user import → merge and report
+function runDataRescue() {
+  const packs = findLegacyTaskArrays();
+
+  if (!packs.length) {
+    alert("No legacy task arrays were found. If you previously used another device/subdomain, open that exact link to run the rescue there.");
+    return;
+  }
+
+  // Show a quick summary and ask to import
+  const summary = packs.map(p => `• ${p.key}  (${Array.isArray(p.tasks) ? p.tasks.length : 0} items)`).join('\n');
+  const ok = confirm(`Found potential legacy data:\n\n${summary}\n\nImport all into your current Plate?`);
+  if (!ok) return;
+
+  let totalAdded = 0, totalSkipped = 0;
+  packs.forEach(p => {
+    const { added, skipped } = mergeTasksIntoActive(Array.isArray(p.tasks) ? p.tasks : []);
+    totalAdded += added; totalSkipped += skipped;
+  });
+
+  alert(`Data Rescue complete.\nAdded: ${totalAdded}\nSkipped (duplicates): ${totalSkipped}`);
+}
 
 // ---------- CONSTANTS ----------
 const ENERGY_RANK = { Low:1, Medium:2, High:3 };
@@ -172,22 +293,38 @@ function showHomeScreen() {
   const root = mountRoot();
   root.appendChild(renderTopBar({ title:"Home" }));
 
-  // Restore button if backup exists
   const hasBackup = !!getLS('backup_plate', null) || !!getLS('backup_persona', null);
 
-  root.insertAdjacentHTML('beforeend', `
+  // main content
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
     <h1>Welcome to LifePlate 🍽️</h1>
-    <div style="margin:8px 0;">
-      <button onclick="startOnboarding()">Start</button>
-      <button onclick="showPromptScreen()">Go to App</button>
-      <button onclick="showMyLocationsManager()">My Locations</button>
-      <button onclick="showGoals()">Goals</button>
+    <div style="margin:8px 0; display:flex; flex-direction:column; gap:8px;">
+      <button id="btnStart">Start</button>
+      <button id="btnApp">Go to App</button>
+      <button id="btnLocs">My Locations</button>
+      <button id="btnGoals">Goals</button>
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
+      <button id="btnRescue">🛟 Data Rescue (temp)</button>
     </div>
-  `);
+  `;
+  root.appendChild(wrap);
+
+  // wire handlers
+  $("btnStart").onclick = () => {
+    if (localStorage.getItem("onboarded") === "true") { showPromptScreen(); }
+    else { showPersonaOptions(); }
+  };
+  $("btnApp").onclick   = showPromptScreen;
+  $("btnLocs").onclick  = showMyLocationsManager;
+  $("btnGoals").onclick = showGoals;
+  $("btnRescue").onclick = (typeof runDataRescue === 'function')
+    ? runDataRescue
+    : () => alert("Data Rescue function not found.");
+
   if (hasBackup) {
     $("restoreBtn").onclick = () => {
-      const bp = getLS('backup_plate', []);
+      const bp   = getLS('backup_plate', []);
       const bper = getLS('backup_persona', null);
       setLS('tasks', bp);
       setLS('persona', bper);
@@ -196,6 +333,7 @@ function showHomeScreen() {
     };
   }
 }
+
 function startOnboarding() {
   if (localStorage.getItem("onboarded") === "true") {
     showPromptScreen();
@@ -454,9 +592,20 @@ function viewTasksChart() {
   const root = mountRoot();
   root.appendChild(renderTopBar({ title:"My Plate", onBack: showPromptScreen }));
 
+  // pull tasks and prep counts
   const tasks = getTasks();
+  if (!tasks || tasks.length === 0) {
+    root.insertAdjacentHTML('beforeend', `
+      <p>Your Plate is empty right now.</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button onclick="showAddTask()">Add a Task</button>
+        <button onclick="showTaskSuggestions()">Clear My Plate</button>
+      </div>
+    `);
+    return;
+  }
 
-  // counts by category
+  // Count tasks by category
   const baseCats = getCategories();
   const counts = {};
   baseCats.forEach(cat => counts[cat] = 0);
@@ -465,32 +614,29 @@ function viewTasksChart() {
     if (!(cat in counts)) counts[cat] = 0;
     counts[cat]++;
   });
-  const labels = Object.keys(counts).filter(cat => counts[cat] > 0);
-  const data = labels.map(cat => counts[cat]);
+  const labels = Object.keys(counts).filter(c => counts[c] > 0);
+  const data   = labels.map(c => counts[c]);
 
-  // Clear My Plate button
-  // instead of wiping, send users to the Clear-My-Plate flow
-const clearBtn = document.createElement('button');
-clearBtn.textContent = "Clear My Plate";
-clearBtn.onclick = () => {
-  // go to the same screen as the Home button “Clear My Plate”
-  if (typeof showTaskSuggestions === 'function') {
-    showTaskSuggestions();
-  } else {
-    // fallback: if your function name differs
-    alert("Clear My Plate is under the Suggestions screen.");
-  }
-};
-root.appendChild(clearBtn);
-
-
+  // chart canvas
   root.insertAdjacentHTML('beforeend', `
     <canvas id="taskChart" width="340" height="340"></canvas>
     <div style="margin-top:12px;"></div>
   `);
+
+  // Clear My Plate (ROUTE, don't wipe)
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = "Clear My Plate";
+  clearBtn.onclick = () => {
+    if (typeof showTaskSuggestions === 'function') {
+      showTaskSuggestions();
+    } else {
+      alert("Clear My Plate is under the Suggestions screen.");
+    }
+  };
   root.appendChild(clearBtn);
 
-  const ctx = document.getElementById("taskChart").getContext("2d");
+  // init chart
+  const ctx = $("taskChart").getContext("2d");
   new Chart(ctx, {
     type: "pie",
     data: { labels, datasets: [{ data }] },
@@ -509,6 +655,7 @@ root.appendChild(clearBtn);
     }
   });
 }
+
 
 function showTasksByCategory(category) {
   currentScreen = "category_list";
