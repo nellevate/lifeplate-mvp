@@ -14,6 +14,34 @@ function loadFromLocal(key) {
 function getLS(key, fb=null){ try { return JSON.parse(localStorage.getItem(key)) ?? fb; } catch { return fb; } }
 function setLS(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
 
+// Migrate legacy tasks (stored at localStorage["tasks"]) into whatever the current app reads,
+// so your existing demo data shows up in the chart.
+(function migrateLegacyTasksOnce(){
+  try {
+    // If your app already reads from "tasks", this is a no-op.
+    const legacy = JSON.parse(localStorage.getItem('tasks') || '[]');
+
+    // If a newer store exists (e.g., lp_data_*), only migrate if the new store is empty.
+    const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
+    const newKey = 'lp_data_' + activeId;
+    const newStore = JSON.parse(localStorage.getItem(newKey) || 'null');
+
+    // Case A: app uses lp_data_* (profiles)
+    if (newStore && Array.isArray(newStore.tasks)) {
+      if (legacy.length && newStore.tasks.length === 0) {
+        const categories = JSON.parse(localStorage.getItem('categories') || '[]');
+        localStorage.setItem(newKey, JSON.stringify({ tasks: legacy, categories }));
+      }
+      return;
+    }
+
+    // Case B: app uses plain "tasks" (legacy) -> nothing to do, just ensure it's an array
+    if (!Array.isArray(legacy)) localStorage.setItem('tasks', '[]');
+  } catch(e) {
+    // fail safe: never block the app
+  }
+})();
+
 // ---------- CONSTANTS ----------
 const ENERGY_RANK = { Low:1, Medium:2, High:3 };
 
@@ -440,15 +468,21 @@ function viewTasksChart() {
   const labels = Object.keys(counts).filter(cat => counts[cat] > 0);
   const data = labels.map(cat => counts[cat]);
 
-  // Clear Plate button
-  const clearBtn = document.createElement('button');
-  clearBtn.textContent = "Clear Plate";
-  clearBtn.onclick = ()=>{
-    if(!confirm("Clear all tasks on your Plate?")) return;
-    saveTasks([]);
-    alert("Plate cleared.");
-    viewTasksChart();
-  };
+  // Clear My Plate button
+  // instead of wiping, send users to the Clear-My-Plate flow
+const clearBtn = document.createElement('button');
+clearBtn.textContent = "Clear My Plate";
+clearBtn.onclick = () => {
+  // go to the same screen as the Home button “Clear My Plate”
+  if (typeof showTaskSuggestions === 'function') {
+    showTaskSuggestions();
+  } else {
+    // fallback: if your function name differs
+    alert("Clear My Plate is under the Suggestions screen.");
+  }
+};
+root.appendChild(clearBtn);
+
 
   root.insertAdjacentHTML('beforeend', `
     <canvas id="taskChart" width="340" height="340"></canvas>
