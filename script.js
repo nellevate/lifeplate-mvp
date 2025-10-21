@@ -162,6 +162,35 @@ function runDataRescue() {
 
   alert(`Data Rescue complete.\nAdded: ${totalAdded}\nSkipped (duplicates): ${totalSkipped}`);
 }
+// ----- My Locations -----
+function getMyLocations(){ return getLS('my_locations', []); }
+function saveMyLocations(arr){ setLS('my_locations', Array.from(new Set(arr))); }
+function addMyLocation(loc){
+  const v = (loc||"").trim(); if(!v) return;
+  const next = getMyLocations();
+  if (!next.includes(v)) saveMyLocations([...next, v]);
+}
+
+// ----- My Tags (global + per category) -----
+function _getMyTagsStore(){ return getLS('my_tags_by_category', {}); }
+function _saveMyTagsStore(obj){ setLS('my_tags_by_category', obj); }
+
+function getMyTags(category){
+  const store = _getMyTagsStore();
+  const global = store.__global || [];
+  const perCat = store[category] || [];
+  // combine unique (global first)
+  return Array.from(new Set([...(global||[]), ...(perCat||[])]));
+}
+function addMyTag(category, tag){
+  const t = (tag||"").trim(); if(!t) return;
+  const store = _getMyTagsStore();
+  store.__global = Array.from(new Set([...(store.__global||[]), t]));
+  if (category){
+    store[category] = Array.from(new Set([...(store[category]||[]), t]));
+  }
+  _saveMyTagsStore(store);
+}
 
 // ---------- CONSTANTS ----------
 const ENERGY_RANK = { Low:1, Medium:2, High:3 };
@@ -295,7 +324,6 @@ function showHomeScreen() {
 
   const hasBackup = !!getLS('backup_plate', null) || !!getLS('backup_persona', null);
 
-  // main content
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <h1>Welcome to LifePlate 🍽️</h1>
@@ -306,21 +334,27 @@ function showHomeScreen() {
       <button id="btnGoals">Goals</button>
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
       <button id="btnRescue">🛟 Data Rescue (temp)</button>
+      <button id="btnInspect">🔎 Storage Inspector (temp)</button>
     </div>
   `;
   root.appendChild(wrap);
 
   // wire handlers
   $("btnStart").onclick = () => {
-    if (localStorage.getItem("onboarded") === "true") { showPromptScreen(); }
-    else { showPersonaOptions(); }
+    if (localStorage.getItem("onboarded") === "true") showPromptScreen();
+    else showPersonaOptions();
   };
   $("btnApp").onclick   = showPromptScreen;
   $("btnLocs").onclick  = showMyLocationsManager;
   $("btnGoals").onclick = showGoals;
+
   $("btnRescue").onclick = (typeof runDataRescue === 'function')
     ? runDataRescue
     : () => alert("Data Rescue function not found.");
+
+  $("btnInspect").onclick = (typeof showStorageInspector === 'function')
+    ? showStorageInspector
+    : () => alert("Storage Inspector not found.");
 
   if (hasBackup) {
     $("restoreBtn").onclick = () => {
@@ -459,6 +493,106 @@ function renderLocationChips(){
   });
   return wrap;
 }
+function showStorageInspector(){
+  const root = mountRoot();
+  root.appendChild(renderTopBar({ title:"Storage Inspector", onBack: showHomeScreen }));
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<p>Tap “Import” on any row that looks like your old tasks.</p>`;
+  root.appendChild(wrap);
+
+  const table = document.createElement('div');
+  table.style.marginTop = '8px';
+  root.appendChild(table);
+
+  const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
+  const currentKey = 'lp_data_' + activeId;
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    const raw = localStorage.getItem(key);
+    const parsed = safeParseJSON(raw);
+
+    // Summaries
+    let type = typeof raw;
+    let count = '-';
+    let preview = '';
+
+    if (Array.isArray(parsed)) {
+      type = 'JSON Array';
+      count = parsed.length;
+      if (looksLikeTaskArray(parsed)) {
+        preview = parsed.slice(0,3).map(t => (t.title || t.name || '—')).join(' • ');
+      }
+    } else if (parsed && typeof parsed === 'object') {
+      type = 'JSON Object';
+      if (Array.isArray(parsed.tasks)) {
+        count = parsed.tasks.length + " (tasks field)";
+        preview = parsed.tasks.slice(0,3).map(t => (t.title || t.name || '—')).join(' • ');
+      }
+    } else {
+      type = 'String';
+    }
+
+    const row = document.createElement('div');
+    row.style.cssText = 'border:1px solid #ddd;border-radius:8px;padding:8px;margin:6px 0;';
+    row.innerHTML = `
+      <div><strong>Key:</strong> ${key}${key===currentKey ? ' <em>(current profile)</em>' : ''}</div>
+      <div><strong>Type:</strong> ${type}</div>
+      <div><strong>Count/Hint:</strong> ${count}</div>
+      ${preview ? `<div><strong>Preview:</strong> ${preview}</div>` : ''}
+    `;
+
+    // Import button if it looks promising and isn't already the current profile
+    const importBtn = document.createElement('button');
+    importBtn.textContent = 'Import';
+    importBtn.onclick = () => importFromKey(key);
+    if (key === currentKey) importBtn.disabled = true;
+
+    row.appendChild(importBtn);
+    table.appendChild(row);
+  }
+}
+
+// Merge from any key you tap
+function importFromKey(key){
+  const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
+  const storeKey = 'lp_data_' + activeId;
+  const current = safeParseJSON(localStorage.getItem(storeKey)) || { tasks: [], categories: [] };
+  const payload = safeParseJSON(localStorage.getItem(key));
+
+  let legacy = [];
+  if (Array.isArray(payload)) {
+    legacy = payload;
+  } else if (payload && Array.isArray(payload.tasks)) {
+    legacy = payload.tasks;
+  } else {
+    alert("That key doesn't look like a task list.");
+    return;
+  }
+
+  // normalize + dedupe
+  const normalized = legacy.map(normalizeTask).filter(Boolean);
+  const sig = (t) => t.id ? `id:${t.id}` : `tc:${t.title}|${t.createdAt}`;
+  const seen = new Set((current.tasks || []).map(sig));
+
+  let added = 0, skipped = 0;
+  normalized.forEach(t => {
+    const s = sig(t);
+    if (seen.has(s)) { skipped++; return; }
+    current.tasks.push(t);
+    seen.add(s); added++;
+  });
+
+  // categories
+  const catSet = new Set(Array.isArray(current.categories) ? current.categories : []);
+  current.tasks.forEach(t => { if (t.category) catSet.add(t.category); });
+  current.categories = Array.from(catSet);
+
+  localStorage.setItem(storeKey, JSON.stringify(current));
+  alert(`Imported from "${key}". Added: ${added}, Skipped: ${skipped}`);
+  viewTasksChart(); // jump to chart so you can see slices
+}
 
 // ---------- TAG SUGGESTIONS ----------
 const TAGS_BY_CATEGORY = {
@@ -469,10 +603,22 @@ const TAGS_BY_CATEGORY = {
   "Household": ["dishes","laundry","groceries","tidy","trash"],
   "Personal": ["errand","text back","plan","budget","read"],
 };
+
 function renderTagsForCategory(cat){
-  const wrap = document.createElement('div'); wrap.style.marginTop='6px';
-  (TAGS_BY_CATEGORY[cat]||[]).forEach(tag=>{
-    const btn = document.createElement('button'); btn.className='chip'; btn.textContent = tag; btn.style.marginRight='6px';
+  const wrap = document.createElement('div');
+  wrap.style.marginTop = '6px';
+
+  const suggested = Array.from(new Set([...(TAGS_BY_CATEGORY[cat]||[]), ...getMyTags(cat)]));
+  if (!suggested.length){
+    wrap.textContent = "(no suggestions yet)";
+    return wrap;
+  }
+
+  suggested.forEach(tag=>{
+    const btn = document.createElement('button');
+    btn.className='chip';
+    btn.textContent = tag;
+    btn.style.marginRight='6px';
     btn.onclick=()=>{
       const sel = document.querySelector('#taskTags');
       const arr = sel.value ? sel.value.split(',').map(s=>s.trim()).filter(Boolean) : [];
@@ -482,6 +628,7 @@ function renderTagsForCategory(cat){
   });
   return wrap;
 }
+
 
 // ---------- ADD TASK ----------
 function showAddTask() {
@@ -495,7 +642,7 @@ function showAddTask() {
   const form = document.createElement('div');
   form.innerHTML = `
     <label>Title</label><br>
-    <input type="text" id="taskTitle" placeholder="What is the task?"/><br><br>
+    <input type="text" id="taskTitle" placeholder="What is the task?" required/><br><br>
 
     <label>Category</label><br>
     <select id="taskCategory">
@@ -507,24 +654,24 @@ function showAddTask() {
     </div>
     <br>
 
-    <label>Estimate (min, optional)</label><br>
-    <input type="number" id="taskDuration" placeholder="e.g., 15"/><br><br>
+    <label>Estimate Completion Time (min)</label><br>
+    <input type="number" id="taskDuration" min="1" placeholder="e.g., 15" required/><br><br>
 
-    <label>Energy (optional)</label><br>
-    <select id="taskEnergy">
-      <option value="">Any</option>
+    <label>Energy</label><br>
+    <select id="taskEnergy" required>
+      <option value="" disabled selected>Select energy</option>
       <option value="Low">Low</option>
       <option value="Medium">Medium</option>
       <option value="High">High</option>
     </select><br><br>
 
     <label>Location (optional)</label><br>
-    <input type="text" id="taskLocation" placeholder="Home, Library, Gym"/><br>
     <div id="myLocChips" style="margin:6px 0;"></div>
+    <input type="text" id="taskLocation" placeholder="Home, Library, Gym"/><br><br>
 
     <label>Tags (optional)</label><br>
-    <input type="text" id="taskTags" placeholder="comma separated"/><br>
     <div id="autoTags" style="margin:6px 0;"></div>
+    <input type="text" id="taskTags" placeholder="comma separated"/><br><br>
 
     <label>Notes (optional)</label><br>
     <textarea id="taskNotes" placeholder="Notes or links..."></textarea><br><br>
@@ -533,13 +680,13 @@ function showAddTask() {
   `;
   root.appendChild(form);
 
-  // wire up dynamic bits
+  // Wire up dynamic bits
   const catSel = form.querySelector('#taskCategory');
   const otherRow = form.querySelector('#otherCategoryRow');
   const refreshAuto = ()=>{
     const holder = form.querySelector('#autoTags');
     holder.innerHTML = `<div>Suggestions:</div>`;
-    holder.appendChild(renderTagsForCategory(catSel.value));
+    holder.appendChild(renderTagsForCategory(catSel.value === "__OTHER__" ? "Personal" : catSel.value));
   };
   catSel.onchange = ()=>{
     otherRow.style.display = (catSel.value === "__OTHER__") ? 'block' : 'none';
@@ -547,9 +694,10 @@ function showAddTask() {
   };
   refreshAuto();
 
-  // My Locations chips
+  // My Locations chips (above the input)
   form.querySelector('#myLocChips').appendChild(renderLocationChips());
 
+  // Save
   form.querySelector('#saveTask').onclick = addTask;
 }
 
@@ -567,18 +715,38 @@ function addTask() {
     }
   }
 
-  const duration = parseInt($("taskDuration").value, 10); // optional
-  const energy = $("taskEnergy").value || null;
+  // REQUIRED: Estimate + Energy
+  const durationVal = $("taskDuration").value;
+  const duration = parseInt(durationVal, 10);
+  if (!durationVal || isNaN(duration) || duration < 1){
+    alert("Please provide an Estimate Completion Time (in minutes).");
+    $("taskDuration").focus();
+    return;
+  }
+  const energy = $("taskEnergy").value;
+  if (!energy){
+    alert("Please select an Energy level.");
+    $("taskEnergy").focus();
+    return;
+  }
+
+  // Location (optional) — auto-save new to My Locations
   const location = ($("taskLocation").value || "").trim() || null;
-  const tags = ($("taskTags").value || "").split(",").map(t => t.trim()).filter(Boolean);
+  if (location) addMyLocation(location);
+
+  // Tags (optional) — auto-save each new tag to My Tags (global + per-category)
+  const rawTags = ($("taskTags").value || "").split(",").map(t => t.trim()).filter(Boolean);
+  rawTags.forEach(t => addMyTag(category, t));
+
   const notes = ($("taskNotes").value || "").trim() || null;
 
   const tasks = getTasks();
   tasks.push({
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
     title, category,
-    duration: isNaN(duration) ? null : duration,
-    energy, location, tags, notes,
+    duration, // required now
+    energy,   // required now
+    location, tags: rawTags, notes,
     createdAt: Date.now()
   });
   saveTasks(tasks);
