@@ -333,8 +333,8 @@ function showHomeScreen() {
       <button id="btnLocs">My Locations</button>
       <button id="btnGoals">Goals</button>
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
-      <button id="btnRescue">🛟 Data Rescue (temp)</button>
-      <button id="btnInspect">🔎 Storage Inspector (temp)</button>
+      <button id="btnTrash">🗑️ Task Trash</button>
+
     </div>
   `;
   root.appendChild(wrap);
@@ -348,14 +348,6 @@ function showHomeScreen() {
   $("btnLocs").onclick  = showMyLocationsManager;
   $("btnGoals").onclick = showGoals;
 
-  $("btnRescue").onclick = (typeof runDataRescue === 'function')
-    ? runDataRescue
-    : () => alert("Data Rescue function not found.");
-
-  $("btnInspect").onclick = (typeof showStorageInspector === 'function')
-    ? showStorageInspector
-    : () => alert("Storage Inspector not found.");
-
   if (hasBackup) {
     $("restoreBtn").onclick = () => {
       const bp   = getLS('backup_plate', []);
@@ -366,6 +358,7 @@ function showHomeScreen() {
       showHomeScreen();
     };
   }
+  $("btnTrash").onclick = showTaskTrash;
 }
 
 function startOnboarding() {
@@ -594,6 +587,19 @@ function importFromKey(key){
   viewTasksChart(); // jump to chart so you can see slices
 }
 
+// ----- Completed (Trash) -----
+function getCompletedTasks(){ return getLS('completed_tasks', []); }
+function saveCompletedTasks(arr){ setLS('completed_tasks', arr); }
+
+function archiveTask(task){
+  const trash = getCompletedTasks();
+  trash.unshift({
+    ...task,
+    completedAt: Date.now()
+  });
+  saveCompletedTasks(trash);
+}
+  
 // ---------- TAG SUGGESTIONS ----------
 const TAGS_BY_CATEGORY = {
   "Academics": ["study","reading","research","paper","lab"],
@@ -754,6 +760,130 @@ function addTask() {
   showPromptScreen();
 }
 
+function showEditTask(taskId){
+  currentScreen = "edit";
+  const tasks = getTasks();
+  const t = tasks.find(x => x.id === taskId);
+  if(!t){ alert("Task not found."); showPromptScreen(); return; }
+
+  const root = mountRoot();
+  root.appendChild(renderTopBar({ title:"Edit Task", onBack: ()=>showTasksByCategory(t.category || "Personal") }));
+
+  const cats = getCategories();
+  const categoryOptions = cats.map(c => `<option value="${c}" ${t.category===c ? 'selected':''}>${c}</option>`).join("");
+
+  const form = document.createElement('div');
+  form.innerHTML = `
+    <label>Title</label><br>
+    <input type="text" id="eTitle" value="${t.title||''}" required/><br><br>
+
+    <label>Category</label><br>
+    <select id="eCategory">
+      ${categoryOptions}
+      <option value="__OTHER__">Other…</option>
+    </select>
+    <div id="eOtherCatRow" style="display:none; margin-top:6px;">
+      <input id="eCategoryOther" placeholder="Type a category"/>
+    </div>
+    <br>
+
+    <label>Estimate Completion Time (min)</label><br>
+    <input type="number" id="eDuration" min="1" value="${t.duration ?? ''}" required/><br><br>
+
+    <label>Energy</label><br>
+    <select id="eEnergy" required>
+      <option value="" disabled ${!t.energy ? 'selected':''}>Select energy</option>
+      <option value="Low" ${t.energy==='Low' ? 'selected':''}>Low</option>
+      <option value="Medium" ${t.energy==='Medium' ? 'selected':''}>Medium</option>
+      <option value="High" ${t.energy==='High' ? 'selected':''}>High</option>
+    </select><br><br>
+
+    <label>Location (optional)</label><br>
+    <div id="eLocChips" style="margin:6px 0;"></div>
+    <input type="text" id="eLocation" value="${t.location || ''}" placeholder="Home, Library, Gym"/><br><br>
+
+    <label>Tags (optional)</label><br>
+    <div id="eAutoTags" style="margin:6px 0;"></div>
+    <input type="text" id="eTags" value="${(t.tags||[]).join(', ')}" placeholder="comma separated"/><br><br>
+
+    <label>Notes (optional)</label><br>
+    <textarea id="eNotes" placeholder="Notes or links...">${t.notes || ''}</textarea><br><br>
+
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button id="eSave">💾 Save Changes</button>
+      <button id="eCancel">Cancel</button>
+    </div>
+  `;
+  root.appendChild(form);
+
+  // Dynamic: other category row + tag suggestions + location chips
+  const sel = form.querySelector('#eCategory');
+  const otherRow = form.querySelector('#eOtherCatRow');
+
+  const refreshTags = ()=>{
+    const cat = sel.value === "__OTHER__" ? "Personal" : sel.value;
+    const holder = form.querySelector('#eAutoTags');
+    holder.innerHTML = `<div>Suggestions:</div>`;
+    holder.appendChild(renderTagsForCategory(cat));
+  };
+
+  sel.onchange = ()=>{
+    otherRow.style.display = (sel.value === "__OTHER__") ? 'block' : 'none';
+    refreshTags();
+  };
+  refreshTags();
+
+  // location chips
+  form.querySelector('#eLocChips').appendChild(renderLocationChips());
+
+  // handlers
+  form.querySelector('#eCancel').onclick = ()=>showTasksByCategory(t.category || "Personal");
+  form.querySelector('#eSave').onclick = ()=>{
+    const title = document.querySelector('#eTitle').value.trim();
+    if(!title){ alert("Please add a title"); return; }
+
+    let category = sel.value;
+    if (category === "__OTHER__") {
+      category = (document.querySelector('#eCategoryOther').value || '').trim() || "Other";
+      const cats = getCategories();
+      if (!cats.includes(category)) {
+        try { localStorage.setItem("categories", JSON.stringify([...cats, category])); } catch {}
+      }
+    }
+
+    const durationVal = document.querySelector('#eDuration').value;
+    const duration = parseInt(durationVal, 10);
+    if(!durationVal || isNaN(duration) || duration < 1){
+      alert("Please provide an Estimate Completion Time (in minutes).");
+      document.querySelector('#eDuration').focus(); return;
+    }
+
+    const energy = document.querySelector('#eEnergy').value;
+    if(!energy){ alert("Please select an Energy level."); document.querySelector('#eEnergy').focus(); return; }
+
+    const location = (document.querySelector('#eLocation').value || '').trim() || null;
+    if (location) addMyLocation(location);
+
+    const rawTags = (document.querySelector('#eTags').value || '').split(',').map(s=>s.trim()).filter(Boolean);
+    rawTags.forEach(tag => addMyTag(category, tag));
+
+    const notes = (document.querySelector('#eNotes').value || '').trim() || null;
+
+    // save back
+    const tasks = getTasks();
+    const idx = tasks.findIndex(x => x.id === taskId);
+    if (idx === -1){ alert("Task not found."); showPromptScreen(); return; }
+
+    tasks[idx] = {
+      ...tasks[idx],
+      title, category, duration, energy, location, tags: rawTags, notes
+    };
+    saveTasks(tasks);
+    alert("Task updated.");
+    showTasksByCategory(category);
+  };
+}
+
 // ---------- VIEW PLATE (DEFAULT PIE) ----------
 function viewTasksChart() {
   currentScreen = "view_chart";
@@ -824,17 +954,18 @@ function viewTasksChart() {
   });
 }
 
-
 function showTasksByCategory(category) {
   currentScreen = "category_list";
   const root = mountRoot();
   root.appendChild(renderTopBar({ title:`${category} Tasks`, onBack: viewTasksChart }));
+
   const tasks = getTasks().filter(t => (t.category || "Uncategorized") === category);
 
   if (!tasks.length) {
     root.insertAdjacentHTML('beforeend', `<p>No tasks found in this category.</p>`);
     return;
   }
+
   tasks.forEach(t=>{
     const card = document.createElement('div');
     card.style.cssText="border:1px solid #ccc;padding:10px;margin:8px 0;border-radius:8px;";
@@ -844,6 +975,102 @@ function showTasksByCategory(category) {
       ${t.location ? `@ ${t.location}<br>`:``}
       ${t.tags && t.tags.length ? `Tags: ${t.tags.join(', ')}` : ``}
     `;
+
+    const actions = document.createElement('div');
+    actions.style.marginTop = '8px';
+
+    const editBtn = document.createElement('button');
+    editBtn.textContent = "Edit";
+    editBtn.onclick = ()=> showEditTask(t.id);
+
+    const doneBtn = document.createElement('button');
+    doneBtn.textContent = "Cleared";
+    doneBtn.style.marginLeft = '8px';
+    doneBtn.onclick = ()=>{
+      completeTask(t.id);         // archives to Trash
+      launchConfetti();
+      showTasksByCategory(category); // refresh list
+    };
+
+    actions.appendChild(editBtn);
+    actions.appendChild(doneBtn);
+    card.appendChild(actions);
+    root.appendChild(card);
+  });
+}
+
+function showTaskTrash(){
+  currentScreen = "trash";
+  const root = mountRoot();
+  root.appendChild(renderTopBar({ title:"Task Trash", onBack: showPromptScreen }));
+
+  const trash = getCompletedTasks();
+  if (!trash.length){
+    root.insertAdjacentHTML('beforeend', `<p>No completed tasks yet.</p>`);
+    return;
+  }
+
+  // Controls
+  const actions = document.createElement('div');
+  actions.style.margin = '8px 0';
+  const clearAll = document.createElement('button');
+  clearAll.textContent = "Empty Trash";
+  clearAll.onclick = ()=>{
+    const ok = confirm("Permanently delete all completed tasks?");
+    if(!ok) return;
+    saveCompletedTasks([]);
+    showTaskTrash();
+  };
+  actions.appendChild(clearAll);
+  root.appendChild(actions);
+
+  // List
+  trash.forEach((t, i)=>{
+    const card = document.createElement('div');
+    card.style.cssText="border:1px solid #ccc;padding:10px;margin:8px 0;border-radius:8px;";
+    const when = new Date(t.completedAt || Date.now()).toLocaleString();
+    card.innerHTML = `
+      <strong>${t.title}</strong><br>
+      ${t.duration ?? 0} min • ${t.energy || "—"} • ${t.category || "—"}<br>
+      ${t.location ? `@ ${t.location}<br>` : ``}
+      <small>Completed: ${when}</small>
+    `;
+
+    const row = document.createElement('div');
+    row.style.marginTop = '8px';
+
+    const restore = document.createElement('button');
+    restore.textContent = "Restore";
+    restore.onclick = ()=>{
+      // put back into active tasks
+      const active = getTasks();
+      active.unshift({
+        ...t,
+        // keep same id to avoid duplicates; if you'd prefer a new id:
+        // id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now())
+      });
+      saveTasks(active);
+
+      // remove from trash
+      const remaining = getCompletedTasks().filter((_, idx)=> idx!==i);
+      saveCompletedTasks(remaining);
+      showTaskTrash();
+    };
+
+    const del = document.createElement('button');
+    del.textContent = "Delete";
+    del.style.marginLeft = '8px';
+    del.onclick = ()=>{
+      const ok = confirm(`Delete "${t.title}" permanently?`);
+      if(!ok) return;
+      const remaining = getCompletedTasks().filter((_, idx)=> idx!==i);
+      saveCompletedTasks(remaining);
+      showTaskTrash();
+    };
+
+    row.appendChild(restore);
+    row.appendChild(del);
+    card.appendChild(row);
     root.appendChild(card);
   });
 }
@@ -924,7 +1151,7 @@ function pickThree(arr){
 }
 
 function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
-  const root = $("app");
+  const rootEl = $("app");
   const picks = pickThree(_lastCandidates);
 
   const container = document.createElement('div');
@@ -935,7 +1162,6 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
   `;
 
   if (picks.length === 0) {
-    // Low energy mindful moment or tiny step toward goal
     const low = inferredEnergy === 'Low';
     const mm = document.createElement('div');
     mm.style.cssText="border:1px dashed #bbb;padding:10px;border-radius:8px;margin:8px 0;";
@@ -960,34 +1186,41 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
         ${(t.duration ?? 0)} min • ${(t.energy || "Medium")} • ${(t.category || "-")}<br>
         ${t.location ? `@ ${t.location}<br>` : ``}
       `;
-      const actions = document.createElement('div'); actions.style.marginTop='8px';
 
-      // Motivate
-      const btnMot = document.createElement('button'); btnMot.textContent="Motivate";
+      const actions = document.createElement('div');
+      actions.style.marginTop='8px';
+
+      const btnMot = document.createElement('button');
+      btnMot.textContent = "Motivate";
       btnMot.onclick = ()=>{ const q = getQuoteForPersona(); alert(`“${q.text}” — ${q.author}`); };
 
-      // Cleared
-      const btnDone = document.createElement('button'); btnDone.textContent="Cleared";
+      const btnEdit = document.createElement('button');
+      btnEdit.textContent = "Edit";
+      btnEdit.style.marginLeft = '8px';
+      btnEdit.onclick = ()=> showEditTask(t.id);
+
+      const btnDone = document.createElement('button');
+      btnDone.textContent = "Cleared";
+      btnDone.style.marginLeft = '8px';
       btnDone.onclick = ()=>{
-        const remaining = getTasks().filter(x => x.id !== t.id);
-        saveTasks(remaining);
+        completeTask(t.id);       // archives to Trash
         launchConfetti();
-        alert("Nice! Task cleared.");
-        suggestTasks(); // refresh list
+        suggestTasks();           // refresh picks
       };
 
-      actions.appendChild(btnMot); actions.appendChild(btnDone);
+      actions.appendChild(btnMot);
+      actions.appendChild(btnEdit);
+      actions.appendChild(btnDone);
       card.appendChild(actions);
       container.appendChild(card);
     });
   }
 
-  // Reshuffle
+  // Reshuffle + Nav
   const reshuffle = document.createElement('button');
   reshuffle.textContent = "Reshuffle";
   reshuffle.onclick = ()=> renderSuggestionPicks({ mood, inferredEnergy, randomPrompt });
 
-  // Nav
   const back = document.createElement('button'); back.textContent="Back"; back.onclick = showTaskSuggestions;
   const home = document.createElement('button'); home.textContent="Main"; home.onclick = showPromptScreen;
 
@@ -995,7 +1228,7 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
   container.appendChild(back);
   container.appendChild(home);
 
-  mountRoot(); // clear then reattach
+  mountRoot();
   const top = renderTopBar({ title:"Clear My Plate", onBack: showPromptScreen });
   $("app").appendChild(top);
   $("app").appendChild(container);
@@ -1004,6 +1237,19 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
   const history = loadFromLocal("moodHistory");
   history.push({ mood, timestamp: new Date().toISOString() });
   saveToLocal("moodHistory", history);
+}
+
+// replaces any existing completeTask
+function completeTask(taskId){
+  const tasks = getTasks();
+  const idx = tasks.findIndex(t => t.id === taskId);
+  if (idx === -1) return;
+
+  const [done] = tasks.splice(idx, 1);
+  saveTasks(tasks);
+
+  // move the finished task to the trash
+  archiveTask(done);
 }
 
 // ---------- SUPPORT / REFLECT ----------
