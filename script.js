@@ -13,6 +13,43 @@ function loadFromLocal(key) {
 }
 function getLS(key, fb=null){ try { return JSON.parse(localStorage.getItem(key)) ?? fb; } catch { return fb; } }
 function setLS(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
+// --- Category → Emoji map (tweak anytime) ---
+const CATEGORY_EMOJI = {
+  "Academics":"📚","Extracurriculars":"🎭","Social":"💬","Self-Care":"🫶",
+  "Health & Wellness":"💪","Family & Home":"🏡","Professional Development":"🧠","Finances":"💰",
+  "Family & Childcare":"🍼","Work":"💼","Travel":"✈️","Household":"🧹",
+  "Career":"📈","Hobbies":"🎨","Family & Relationships":"👨‍👩‍👧‍👦",
+  "Personal":"✨","Health":"❤️","Errands":"🧾","Other":"✅","Uncategorized":"✅"
+};
+function categoryToEmoji(cat){ return CATEGORY_EMOJI[cat] || "✅"; }
+
+// --- Tiny float-up emoji (Libby-style) ---
+(function ensureEmojiStyles(){
+  if (document.getElementById('lp-emoji-style')) return;
+  const s = document.createElement('style');
+  s.id = 'lp-emoji-style';
+  s.textContent = `
+    .lp-emoji-pop {
+      position: fixed; left: 50%; top: calc(50% + 40px); transform: translate(-50%, 0) scale(.9);
+      font-size: 28px; opacity: 0; pointer-events:none; filter: drop-shadow(0 2px 6px rgba(0,0,0,.2));
+      transition: transform .9s cubic-bezier(.22,.61,.36,1), opacity .9s;
+      z-index: 9999;
+    }
+    .lp-emoji-pop.in { opacity: 1; transform: translate(-50%, -80px) scale(1.05); }
+  `;
+  document.head.appendChild(s);
+})();
+function celebrateEmoji(category){
+  const el = document.createElement('div');
+  el.className = 'lp-emoji-pop';
+  el.textContent = categoryToEmoji(category);
+  document.body.appendChild(el);
+  // tiny horizontal randomness
+  const shift = (Math.random()*60 - 30) | 0;
+  el.style.left = `calc(50% + ${shift}px)`;
+  requestAnimationFrame(()=> el.classList.add('in'));
+  setTimeout(()=> el.remove(), 1000);
+}
 
 // ---------- TOAST (auto-dismiss) ----------
 (function ensureToastStyles(){
@@ -309,6 +346,8 @@ function showHomeScreen() {
       <button id="btnGoals">Goals</button>
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
       <button id="btnTrash">🗑️ Task Trash</button>
+      <!-- 👇 NEW BUTTON -->
+      <button id="btnVault">Emoji Vault</button>
     </div>
   `;
   root.appendChild(wrap);
@@ -320,6 +359,8 @@ function showHomeScreen() {
   $("btnApp").onclick   = showPromptScreen;
   $("btnLocs").onclick  = showMyLocationsManager;
   $("btnGoals").onclick = showGoals;
+  $("btnTrash").onclick = showTaskTrash;
+  $("btnVault").onclick = showEmojiVault; // 👈 new click handler
 
   if (hasBackup) {
     $("restoreBtn").onclick = () => {
@@ -331,7 +372,6 @@ function showHomeScreen() {
       showHomeScreen();
     };
   }
-  $("btnTrash").onclick = showTaskTrash;
 }
 
 function startOnboarding() {
@@ -466,10 +506,31 @@ function renderLocationChips(){
 // ----- Completed (Trash) -----
 function getCompletedTasks(){ return getLS('completed_tasks', []); }
 function saveCompletedTasks(arr){ setLS('completed_tasks', arr); }
+
 function archiveTask(task){
+  const emoji = categoryToEmoji(task.category || "Uncategorized");
+  const entry = { ...task, emoji, completedAt: Date.now() };
   const trash = getCompletedTasks();
-  trash.unshift({ ...task, completedAt: Date.now() });
+  trash.unshift(entry);
   saveCompletedTasks(trash);
+}
+
+// When a task is marked done
+function completeTask(taskId){
+  const tasks = getTasks();
+  const idx = tasks.findIndex(t => t.id === taskId);
+  if (idx === -1) return;
+
+  const [done] = tasks.splice(idx, 1);
+  saveTasks(tasks);
+
+  // record + celebrate
+  archiveTask(done);
+  celebrateEmoji(done.category || "Uncategorized");
+  // keep your confetti for extra delight (optional)
+  // launchConfetti();
+
+  // no screen nav here; callers handle re-render
 }
   
 // ---------- TAG SUGGESTIONS ----------
@@ -979,6 +1040,122 @@ function showTaskTrash(){
     card.appendChild(row);
     root.appendChild(card);
   });
+}
+
+// ----- Rewards / Affiliates config -----
+const AFFILIATE_CONFIG = [
+  // edit names/links/thresholds per category
+  { category: "Health & Wellness", name: "Fit Planner Pro", url: "https://example.com/fit", min: 5 },
+  { category: "Finances",         name: "Budget Buddy",    url: "https://example.com/budget", min: 5 },
+  { category: "Work",             name: "Focus Timer+",    url: "https://example.com/focus",  min: 5 },
+  { category: "Self-Care",        name: "Calm Treats",     url: "https://example.com/calm",   min: 5 },
+];
+
+function getCompletionCountsByCategory(){
+  const trash = getCompletedTasks();
+  const counts = {};
+  trash.forEach(t=>{
+    const cat = (t.category || "Uncategorized");
+    counts[cat] = (counts[cat] || 0) + 1;
+  });
+  return counts;
+}
+
+function showEmojiVault(){
+  currentScreen = "vault";
+  const root = mountRoot();
+  const right = [];
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.textContent = "Toggle View";
+  right.push(toggleBtn);
+
+  root.appendChild(renderTopBar({ title:"Your Wins", onBack: showPromptScreen, rightNodes:right }));
+
+  const container = document.createElement('div');
+  root.appendChild(container);
+
+  // state
+  let listMode = false;
+
+  function render(){
+    container.innerHTML = "";
+
+    const counts = getCompletionCountsByCategory();
+    const categories = Object.keys(counts).sort((a,b)=> counts[b]-counts[a]);
+    const total = Object.values(counts).reduce((a,b)=>a+b,0);
+
+    if (!total){
+      container.insertAdjacentHTML('beforeend', `<p>No completed tasks yet — your first emoji arrives when you finish a task.</p>`);
+      return;
+    }
+
+    // Unlocks by category
+    const unlockWrap = document.createElement('div');
+    unlockWrap.style.cssText = "border:1px solid #eee;padding:10px;border-radius:10px;margin:8px 0;background:#fcfcfc;";
+    unlockWrap.innerHTML = `<strong>🎁 Rewards</strong><div id="unlockRows" style="margin-top:8px;"></div>`;
+    container.appendChild(unlockWrap);
+
+    const unlockRows = unlockWrap.querySelector('#unlockRows');
+    AFFILIATE_CONFIG.forEach(cfg=>{
+      const count = counts[cfg.category] || 0;
+      const unlocked = count >= cfg.min;
+      const row = document.createElement('div');
+      row.style.cssText="display:flex;align-items:center;gap:10px;margin:6px 0;";
+      row.innerHTML = `
+        <div style="width:28px;height:28px;font-size:20px;text-align:center;">${categoryToEmoji(cfg.category)}</div>
+        <div style="flex:1">
+          <div><strong>${cfg.category}</strong> · ${count}/${cfg.min}</div>
+          <small>${unlocked ? "Unlocked!" : "Keep going to unlock"}</small>
+        </div>
+        <div>
+          ${unlocked ? `<a href="${cfg.url}" target="_blank"><button>Open ${cfg.name}</button></a>` : `<button disabled>Locked</button>`}
+        </div>
+      `;
+      unlockRows.appendChild(row);
+    });
+
+    // Grid or List of completions
+    if (!listMode){
+      // GRID: categories with emoji tiles + badges
+      const grid = document.createElement('div');
+      grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin-top:12px;";
+      categories.forEach(cat=>{
+        const tile = document.createElement('div');
+        tile.style.cssText = "border:1px solid #ddd;border-radius:12px;padding:12px;text-align:center;background:white;";
+        const emoji = categoryToEmoji(cat);
+        tile.innerHTML = `
+          <div style="font-size:28px;">${emoji}</div>
+          <div style="margin-top:6px;font-weight:600;">${cat}</div>
+          <div style="margin-top:2px;color:#666;">${counts[cat]} done</div>
+        `;
+        grid.appendChild(tile);
+      });
+      container.appendChild(grid);
+    } else {
+      // LIST: chronological completed tasks with emoji
+      const list = document.createElement('div');
+      const trash = getCompletedTasks();
+      trash.forEach(t=>{
+        const row = document.createElement('div');
+        row.style.cssText="border-bottom:1px solid #eee;padding:10px 0;display:flex;gap:10px;align-items:center;";
+        const em = t.emoji || categoryToEmoji(t.category || "Uncategorized");
+        const when = new Date(t.completedAt || Date.now()).toLocaleString();
+        row.innerHTML = `
+          <div style="font-size:22px;width:28px;text-align:center;">${em}</div>
+          <div style="flex:1">
+            <div><strong>${t.title}</strong> · <span style="color:#666">${t.category || "—"}</span></div>
+            <small>${when}</small>
+          </div>
+        `;
+        list.appendChild(row);
+      });
+      container.appendChild(list);
+    }
+  }
+
+  toggleBtn.onclick = ()=>{ listMode = !listMode; render(); };
+  render();
 }
 
 // ---------- SUGGESTIONS / CLEAR MY PLATE ----------
