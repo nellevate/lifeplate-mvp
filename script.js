@@ -347,7 +347,7 @@ function showHomeScreen() {
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
       <button id="btnTrash">🗑️ Task Trash</button>
       <!-- 👇 NEW BUTTON -->
-      <button id="btnVault">Emoji Vault</button>
+      <button id="btnVault">🎁 Rewards Center</button>
     </div>
   `;
   root.appendChild(wrap);
