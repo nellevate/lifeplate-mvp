@@ -1,5 +1,5 @@
 // ===============================
-// 🚀 LifePlate App — script.js (Beta Fixes)
+// 🚀 LifePlate App — script.js (Step 1 Updates)
 // ===============================
 
 // ---------- GLOBAL ----------
@@ -14,19 +14,41 @@ function loadFromLocal(key) {
 function getLS(key, fb=null){ try { return JSON.parse(localStorage.getItem(key)) ?? fb; } catch { return fb; } }
 function setLS(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
 
-// Migrate legacy tasks (stored at localStorage["tasks"]) into whatever the current app reads,
-// so your existing demo data shows up in the chart.
+// ---------- TOAST (auto-dismiss) ----------
+(function ensureToastStyles(){
+  if (document.getElementById('lp-toast-styles')) return;
+  const s = document.createElement('style');
+  s.id = 'lp-toast-styles';
+  s.textContent = `
+    .lp-toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(16px);
+      background: #111; color: #fff; padding: 10px 14px; border-radius: 10px;
+      opacity: 0; transition: opacity .18s ease, transform .18s ease; z-index: 9999;
+      font-size: 14px; box-shadow: 0 6px 16px rgba(0,0,0,.15);
+    }
+    .lp-toast.in { opacity: 1; transform: translateX(-50%) translateY(0); }
+  `;
+  document.head.appendChild(s);
+})();
+function showToast(msg, ms=1800){
+  const el = document.createElement('div');
+  el.className = 'lp-toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  requestAnimationFrame(()=> el.classList.add('in'));
+  setTimeout(()=>{
+    el.classList.remove('in');
+    el.addEventListener('transitionend', ()=> el.remove(), { once:true });
+  }, ms);
+}
+
+// ---------- Legacy migration helpers (unchanged) ----------
 (function migrateLegacyTasksOnce(){
   try {
-    // If your app already reads from "tasks", this is a no-op.
     const legacy = JSON.parse(localStorage.getItem('tasks') || '[]');
-
-    // If a newer store exists (e.g., lp_data_*), only migrate if the new store is empty.
     const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
     const newKey = 'lp_data_' + activeId;
     const newStore = JSON.parse(localStorage.getItem(newKey) || 'null');
-
-    // Case A: app uses lp_data_* (profiles)
     if (newStore && Array.isArray(newStore.tasks)) {
       if (legacy.length && newStore.tasks.length === 0) {
         const categories = JSON.parse(localStorage.getItem('categories') || '[]');
@@ -34,35 +56,22 @@ function setLS(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
       }
       return;
     }
-
-    // Case B: app uses plain "tasks" (legacy) -> nothing to do, just ensure it's an array
     if (!Array.isArray(legacy)) localStorage.setItem('tasks', '[]');
-  } catch(e) {
-    // fail safe: never block the app
-  }
+  } catch(e) {}
 })();
-// -------- DATA RESCUE (legacy localStorage migration) --------
-function safeParseJSON(str) {
-  try { return JSON.parse(str); } catch { return null; }
-}
-
-// Heuristically detect arrays of "task-like" objects
+function safeParseJSON(str) { try { return JSON.parse(str); } catch { return null; } }
 function looksLikeTaskArray(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return false;
-  // task is object with at least a title or name-ish
   const sample = arr.find(x => x && typeof x === 'object');
   if (!sample) return false;
   const hasTitle = typeof sample.title === 'string' && sample.title.trim().length > 0;
   const hasName = typeof sample.name === 'string' && sample.name.trim().length > 0;
   return hasTitle || hasName;
 }
-
-// Normalize various legacy shapes into current task shape
 function normalizeTask(t) {
   if (!t || typeof t !== 'object') return null;
   const title = (t.title || t.name || "").toString().trim();
   if (!title) return null;
-
   const category = (t.category || t.segment || t.type || "Personal").toString().trim();
   const energy = (t.energy || t.energyLevel || t.moodEnergy || "").toString().trim();
   const duration = (typeof t.duration === 'number') ? t.duration
@@ -75,7 +84,6 @@ function normalizeTask(t) {
              : [];
   const createdAt = t.createdAt || t.created || t.timestamp || Date.now();
   const id = t.id || t._id || `${title}-${createdAt}`;
-
   return {
     id: String(id),
     title,
@@ -85,43 +93,29 @@ function normalizeTask(t) {
     location,
     tags,
     notes: t.notes || null,
-    createdAt: createdAt
+    createdAt: createdAt,
+    dueDate: t.dueDate || null
   };
 }
-
-// Scan ALL localStorage keys to find legacy task arrays
 function findLegacyTaskArrays() {
   const results = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-
-    // Skip current profile store keys to avoid re-importing
     if (key && (key.startsWith('lp_data_') || key === 'lp_profiles' || key === 'lp_activeProfileId')) continue;
-
-    const raw = localStorage.getItem(key);
-    const parsed = safeParseJSON(raw);
-    if (looksLikeTaskArray(parsed)) {
-      results.push({ key, tasks: parsed });
-    }
+    const parsed = safeParseJSON(localStorage.getItem(key));
+    if (looksLikeTaskArray(parsed)) results.push({ key, tasks: parsed });
   }
   return results;
 }
-
-// Merge legacy tasks into the current active profile without duplicates
 function mergeTasksIntoActive(legacyTasks) {
   const normalized = legacyTasks.map(normalizeTask).filter(Boolean);
   if (!normalized.length) return { added: 0, skipped: 0 };
-
-  // Load current tasks
   const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
   const storeKey = 'lp_data_' + activeId;
   const current = safeParseJSON(localStorage.getItem(storeKey)) || { tasks: [], categories: [] };
   const currentTasks = Array.isArray(current.tasks) ? current.tasks : [];
-
-  // Use a set of signatures (id OR title+createdAt) for dedupe
   const sig = (t) => t.id ? `id:${t.id}` : `tc:${t.title}|${t.createdAt}`;
   const seen = new Set(currentTasks.map(sig));
-
   let added = 0, skipped = 0;
   normalized.forEach(t => {
     const s = sig(t);
@@ -129,39 +123,27 @@ function mergeTasksIntoActive(legacyTasks) {
     currentTasks.push(t);
     seen.add(s); added++;
   });
-
-  // update categories with any unseen categories
   const catSet = new Set(Array.isArray(current.categories) ? current.categories : []);
   currentTasks.forEach(t => { if (t.category) catSet.add(t.category); });
   current.tasks = currentTasks;
   current.categories = Array.from(catSet);
-
   localStorage.setItem(storeKey, JSON.stringify(current));
   return { added, skipped };
 }
-
-// One-click rescue: scan keys → let user import → merge and report
 function runDataRescue() {
   const packs = findLegacyTaskArrays();
-
-  if (!packs.length) {
-    alert("No legacy task arrays were found. If you previously used another device/subdomain, open that exact link to run the rescue there.");
-    return;
-  }
-
-  // Show a quick summary and ask to import
+  if (!packs.length) { alert("No legacy task arrays were found."); return; }
   const summary = packs.map(p => `• ${p.key}  (${Array.isArray(p.tasks) ? p.tasks.length : 0} items)`).join('\n');
   const ok = confirm(`Found potential legacy data:\n\n${summary}\n\nImport all into your current Plate?`);
   if (!ok) return;
-
   let totalAdded = 0, totalSkipped = 0;
   packs.forEach(p => {
     const { added, skipped } = mergeTasksIntoActive(Array.isArray(p.tasks) ? p.tasks : []);
     totalAdded += added; totalSkipped += skipped;
   });
-
   alert(`Data Rescue complete.\nAdded: ${totalAdded}\nSkipped (duplicates): ${totalSkipped}`);
 }
+
 // ----- My Locations -----
 function getMyLocations(){ return getLS('my_locations', []); }
 function saveMyLocations(arr){ setLS('my_locations', Array.from(new Set(arr))); }
@@ -174,12 +156,10 @@ function addMyLocation(loc){
 // ----- My Tags (global + per category) -----
 function _getMyTagsStore(){ return getLS('my_tags_by_category', {}); }
 function _saveMyTagsStore(obj){ setLS('my_tags_by_category', obj); }
-
 function getMyTags(category){
   const store = _getMyTagsStore();
   const global = store.__global || [];
   const perCat = store[category] || [];
-  // combine unique (global first)
   return Array.from(new Set([...(global||[]), ...(perCat||[])]));
 }
 function addMyTag(category, tag){
@@ -211,7 +191,6 @@ const CATEGORIES_BY_PERSONA = {
   ],
   Blank: ["Personal", "Work", "Health", "Errands", "Finances"]
 };
-
 function getCategories() {
   try {
     const cats = JSON.parse(localStorage.getItem("categories") || "[]");
@@ -224,19 +203,15 @@ let quizData = [];
 let currentQuestionIndex = 0;
 let promptScores = {};
 let promptLibrary = [];
-
-// Load quiz + prompts
 fetch("lifeplate_onboarding_quiz.json")
   .then(r => r.ok ? r.json() : { questions: [] })
   .then(data => { quizData = data.questions || []; })
   .catch(() => { quizData = []; });
-
 fetch("promptLibrary.json")
   .then(r => r.ok ? r.json() : [])
   .then(data => { promptLibrary = data || []; })
   .catch(() => { promptLibrary = []; });
 
-// Helpers for prompts
 function getTopPromptTags(scores, topN = 3) {
   return Object.entries(scores || {})
     .sort((a,b) => b[1]-a[1])
@@ -334,12 +309,10 @@ function showHomeScreen() {
       <button id="btnGoals">Goals</button>
       ${hasBackup ? `<button id="restoreBtn">Restore Plate + Persona</button>` : ``}
       <button id="btnTrash">🗑️ Task Trash</button>
-
     </div>
   `;
   root.appendChild(wrap);
 
-  // wire handlers
   $("btnStart").onclick = () => {
     if (localStorage.getItem("onboarded") === "true") showPromptScreen();
     else showPersonaOptions();
@@ -417,7 +390,12 @@ function showPromptScreen() {
   const activeId = getActiveProfileId();
   const active = profiles.find(p => p.id === activeId) || { name: "My Plate" };
 
-  root.appendChild(renderTopBar({ title:"Prompt Hub" }));
+  // NEW: Home button on the right
+  const homeBtn = document.createElement('button');
+  homeBtn.textContent = "Home";
+  homeBtn.onclick = showHomeScreen;
+
+  root.appendChild(renderTopBar({ title:"Prompt Hub", rightNodes:[homeBtn] }));
   root.insertAdjacentHTML('beforeend', `
     <div style="margin:8px 0; padding:8px; border:1px solid #ddd;">
       <strong>Plate:</strong> ${active.name}
@@ -441,12 +419,10 @@ function showPromptScreen() {
 
 // ---------- RETAKE QUIZ WARNING + RESTORE ----------
 function startQuizWithWarning(){
-  // backup first
   setLS('backup_plate', getTasks());
   setLS('backup_persona', localStorage.getItem('persona') || null);
   const ok = confirm("Retaking the onboarding quiz will wipe your current Plate and persona. You can restore them from Home. Continue?");
   if(!ok) return;
-  // wipe
   saveTasks([]);
   localStorage.removeItem('persona');
   localStorage.removeItem('categories');
@@ -486,117 +462,13 @@ function renderLocationChips(){
   });
   return wrap;
 }
-function showStorageInspector(){
-  const root = mountRoot();
-  root.appendChild(renderTopBar({ title:"Storage Inspector", onBack: showHomeScreen }));
-
-  const wrap = document.createElement('div');
-  wrap.innerHTML = `<p>Tap “Import” on any row that looks like your old tasks.</p>`;
-  root.appendChild(wrap);
-
-  const table = document.createElement('div');
-  table.style.marginTop = '8px';
-  root.appendChild(table);
-
-  const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
-  const currentKey = 'lp_data_' + activeId;
-
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    const raw = localStorage.getItem(key);
-    const parsed = safeParseJSON(raw);
-
-    // Summaries
-    let type = typeof raw;
-    let count = '-';
-    let preview = '';
-
-    if (Array.isArray(parsed)) {
-      type = 'JSON Array';
-      count = parsed.length;
-      if (looksLikeTaskArray(parsed)) {
-        preview = parsed.slice(0,3).map(t => (t.title || t.name || '—')).join(' • ');
-      }
-    } else if (parsed && typeof parsed === 'object') {
-      type = 'JSON Object';
-      if (Array.isArray(parsed.tasks)) {
-        count = parsed.tasks.length + " (tasks field)";
-        preview = parsed.tasks.slice(0,3).map(t => (t.title || t.name || '—')).join(' • ');
-      }
-    } else {
-      type = 'String';
-    }
-
-    const row = document.createElement('div');
-    row.style.cssText = 'border:1px solid #ddd;border-radius:8px;padding:8px;margin:6px 0;';
-    row.innerHTML = `
-      <div><strong>Key:</strong> ${key}${key===currentKey ? ' <em>(current profile)</em>' : ''}</div>
-      <div><strong>Type:</strong> ${type}</div>
-      <div><strong>Count/Hint:</strong> ${count}</div>
-      ${preview ? `<div><strong>Preview:</strong> ${preview}</div>` : ''}
-    `;
-
-    // Import button if it looks promising and isn't already the current profile
-    const importBtn = document.createElement('button');
-    importBtn.textContent = 'Import';
-    importBtn.onclick = () => importFromKey(key);
-    if (key === currentKey) importBtn.disabled = true;
-
-    row.appendChild(importBtn);
-    table.appendChild(row);
-  }
-}
-
-// Merge from any key you tap
-function importFromKey(key){
-  const activeId = localStorage.getItem('lp_activeProfileId') || 'default';
-  const storeKey = 'lp_data_' + activeId;
-  const current = safeParseJSON(localStorage.getItem(storeKey)) || { tasks: [], categories: [] };
-  const payload = safeParseJSON(localStorage.getItem(key));
-
-  let legacy = [];
-  if (Array.isArray(payload)) {
-    legacy = payload;
-  } else if (payload && Array.isArray(payload.tasks)) {
-    legacy = payload.tasks;
-  } else {
-    alert("That key doesn't look like a task list.");
-    return;
-  }
-
-  // normalize + dedupe
-  const normalized = legacy.map(normalizeTask).filter(Boolean);
-  const sig = (t) => t.id ? `id:${t.id}` : `tc:${t.title}|${t.createdAt}`;
-  const seen = new Set((current.tasks || []).map(sig));
-
-  let added = 0, skipped = 0;
-  normalized.forEach(t => {
-    const s = sig(t);
-    if (seen.has(s)) { skipped++; return; }
-    current.tasks.push(t);
-    seen.add(s); added++;
-  });
-
-  // categories
-  const catSet = new Set(Array.isArray(current.categories) ? current.categories : []);
-  current.tasks.forEach(t => { if (t.category) catSet.add(t.category); });
-  current.categories = Array.from(catSet);
-
-  localStorage.setItem(storeKey, JSON.stringify(current));
-  alert(`Imported from "${key}". Added: ${added}, Skipped: ${skipped}`);
-  viewTasksChart(); // jump to chart so you can see slices
-}
 
 // ----- Completed (Trash) -----
 function getCompletedTasks(){ return getLS('completed_tasks', []); }
 function saveCompletedTasks(arr){ setLS('completed_tasks', arr); }
-
 function archiveTask(task){
   const trash = getCompletedTasks();
-  trash.unshift({
-    ...task,
-    completedAt: Date.now()
-  });
+  trash.unshift({ ...task, completedAt: Date.now() });
   saveCompletedTasks(trash);
 }
   
@@ -609,17 +481,14 @@ const TAGS_BY_CATEGORY = {
   "Household": ["dishes","laundry","groceries","tidy","trash"],
   "Personal": ["errand","text back","plan","budget","read"],
 };
-
 function renderTagsForCategory(cat){
   const wrap = document.createElement('div');
   wrap.style.marginTop = '6px';
-
   const suggested = Array.from(new Set([...(TAGS_BY_CATEGORY[cat]||[]), ...getMyTags(cat)]));
   if (!suggested.length){
     wrap.textContent = "(no suggestions yet)";
     return wrap;
   }
-
   suggested.forEach(tag=>{
     const btn = document.createElement('button');
     btn.className='chip';
@@ -634,7 +503,6 @@ function renderTagsForCategory(cat){
   });
   return wrap;
 }
-
 
 // ---------- ADD TASK ----------
 function showAddTask() {
@@ -660,8 +528,9 @@ function showAddTask() {
     </div>
     <br>
 
-    <label>Estimate Completion Time (min)</label><br>
-    <input type="number" id="taskDuration" min="1" placeholder="e.g., 15" required/><br><br>
+    <label>Time Needed</label><br>
+    <div id="timeChips" style="margin:6px 0;"></div>
+    <input type="number" id="taskDuration" min="1" placeholder="Minutes (e.g., 15)" required/><br><br>
 
     <label>Energy</label><br>
     <select id="taskEnergy" required>
@@ -673,7 +542,15 @@ function showAddTask() {
 
     <label>Location (optional)</label><br>
     <div id="myLocChips" style="margin:6px 0;"></div>
-    <input type="text" id="taskLocation" placeholder="Home, Library, Gym"/><br><br>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input type="text" id="taskLocation" placeholder="Home, Library, Gym" style="flex:1;"/>
+      <button id="addLocBtn" type="button">Add</button>
+    </div>
+    <small style="color:#666;">Tip: typing a new location here will save it to My Locations.</small>
+    <br><br>
+
+    <label>Due date (optional)</label><br>
+    <input type="date" id="taskDueDate"/><br><br>
 
     <label>Tags (optional)</label><br>
     <div id="autoTags" style="margin:6px 0;"></div>
@@ -686,7 +563,7 @@ function showAddTask() {
   `;
   root.appendChild(form);
 
-  // Wire up dynamic bits
+  // Category + tag suggestions
   const catSel = form.querySelector('#taskCategory');
   const otherRow = form.querySelector('#otherCategoryRow');
   const refreshAuto = ()=>{
@@ -700,8 +577,31 @@ function showAddTask() {
   };
   refreshAuto();
 
-  // My Locations chips (above the input)
+  // Time chips (quick selections)
+  const chipValues = [5,10,15,25,30,45,60];
+  const chipWrap = form.querySelector('#timeChips');
+  chipValues.forEach(min=>{
+    const b = document.createElement('button');
+    b.textContent = `${min} min`;
+    b.type = "button";
+    b.onclick = ()=> { $("taskDuration").value = String(min); };
+    chipWrap.appendChild(b);
+  });
+
+  // Locations chips
   form.querySelector('#myLocChips').appendChild(renderLocationChips());
+
+  // NEW: Add location on blur or via Add button
+  const locInput = form.querySelector('#taskLocation');
+  locInput.addEventListener('blur', ()=> { const v = locInput.value.trim(); if (v) addMyLocation(v); });
+  form.querySelector('#addLocBtn').onclick = ()=> {
+    const v = locInput.value.trim(); if (!v) return;
+    addMyLocation(v);
+    showToast("Location saved");
+    // re-render chips so it appears immediately
+    form.querySelector('#myLocChips').innerHTML = "";
+    form.querySelector('#myLocChips').appendChild(renderLocationChips());
+  };
 
   // Save
   form.querySelector('#saveTask').onclick = addTask;
@@ -709,7 +609,7 @@ function showAddTask() {
 
 function addTask() {
   const title = $("taskTitle").value.trim();
-  if (!title){ alert("Please add a title"); return; }
+  if (!title){ showToast("Please add a title"); $("taskTitle").focus(); return; }
 
   // category
   let category = $("taskCategory").value;
@@ -725,13 +625,13 @@ function addTask() {
   const durationVal = $("taskDuration").value;
   const duration = parseInt(durationVal, 10);
   if (!durationVal || isNaN(duration) || duration < 1){
-    alert("Please provide an Estimate Completion Time (in minutes).");
+    showToast("Add time in minutes");
     $("taskDuration").focus();
     return;
   }
   const energy = $("taskEnergy").value;
   if (!energy){
-    alert("Please select an Energy level.");
+    showToast("Select an energy level");
     $("taskEnergy").focus();
     return;
   }
@@ -740,7 +640,10 @@ function addTask() {
   const location = ($("taskLocation").value || "").trim() || null;
   if (location) addMyLocation(location);
 
-  // Tags (optional) — auto-save each new tag to My Tags (global + per-category)
+  // Due date (optional)
+  const dueDate = ($("taskDueDate").value || "").trim() || null;
+
+  // Tags (optional) — auto-save each new tag
   const rawTags = ($("taskTags").value || "").split(",").map(t => t.trim()).filter(Boolean);
   rawTags.forEach(t => addMyTag(category, t));
 
@@ -750,21 +653,23 @@ function addTask() {
   tasks.push({
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
     title, category,
-    duration, // required now
-    energy,   // required now
+    duration, energy,
     location, tags: rawTags, notes,
+    dueDate,
     createdAt: Date.now()
   });
   saveTasks(tasks);
-  alert("Task added.");
-  showPromptScreen();
+
+  showToast("Task added");     // no extra click
+  showPromptScreen();          // smooth return to hub
 }
 
+// ---------- EDIT TASK (adds due date support) ----------
 function showEditTask(taskId){
   currentScreen = "edit";
   const tasks = getTasks();
   const t = tasks.find(x => x.id === taskId);
-  if(!t){ alert("Task not found."); showPromptScreen(); return; }
+  if(!t){ showToast("Task not found."); showPromptScreen(); return; }
 
   const root = mountRoot();
   root.appendChild(renderTopBar({ title:"Edit Task", onBack: ()=>showTasksByCategory(t.category || "Personal") }));
@@ -787,7 +692,7 @@ function showEditTask(taskId){
     </div>
     <br>
 
-    <label>Estimate Completion Time (min)</label><br>
+    <label>Time Needed (minutes)</label><br>
     <input type="number" id="eDuration" min="1" value="${t.duration ?? ''}" required/><br><br>
 
     <label>Energy</label><br>
@@ -800,7 +705,14 @@ function showEditTask(taskId){
 
     <label>Location (optional)</label><br>
     <div id="eLocChips" style="margin:6px 0;"></div>
-    <input type="text" id="eLocation" value="${t.location || ''}" placeholder="Home, Library, Gym"/><br><br>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input type="text" id="eLocation" value="${t.location || ''}" placeholder="Home, Library, Gym" style="flex:1;"/>
+      <button id="eAddLocBtn" type="button">Add</button>
+    </div>
+    <br>
+
+    <label>Due date (optional)</label><br>
+    <input type="date" id="eDueDate" value="${t.dueDate ? String(t.dueDate) : ''}"/><br><br>
 
     <label>Tags (optional)</label><br>
     <div id="eAutoTags" style="margin:6px 0;"></div>
@@ -816,31 +728,38 @@ function showEditTask(taskId){
   `;
   root.appendChild(form);
 
-  // Dynamic: other category row + tag suggestions + location chips
+  // Dynamic: categories + tag suggestions
   const sel = form.querySelector('#eCategory');
   const otherRow = form.querySelector('#eOtherCatRow');
-
   const refreshTags = ()=>{
     const cat = sel.value === "__OTHER__" ? "Personal" : sel.value;
     const holder = form.querySelector('#eAutoTags');
     holder.innerHTML = `<div>Suggestions:</div>`;
     holder.appendChild(renderTagsForCategory(cat));
   };
-
   sel.onchange = ()=>{
     otherRow.style.display = (sel.value === "__OTHER__") ? 'block' : 'none';
     refreshTags();
   };
   refreshTags();
 
-  // location chips
+  // locations
   form.querySelector('#eLocChips').appendChild(renderLocationChips());
+  const locInput = form.querySelector('#eLocation');
+  locInput.addEventListener('blur', ()=> { const v = locInput.value.trim(); if (v) addMyLocation(v); });
+  form.querySelector('#eAddLocBtn').onclick = ()=> {
+    const v = locInput.value.trim(); if (!v) return;
+    addMyLocation(v);
+    showToast("Location saved");
+    form.querySelector('#eLocChips').innerHTML = "";
+    form.querySelector('#eLocChips').appendChild(renderLocationChips());
+  };
 
   // handlers
   form.querySelector('#eCancel').onclick = ()=>showTasksByCategory(t.category || "Personal");
   form.querySelector('#eSave').onclick = ()=>{
     const title = document.querySelector('#eTitle').value.trim();
-    if(!title){ alert("Please add a title"); return; }
+    if(!title){ showToast("Please add a title"); return; }
 
     let category = sel.value;
     if (category === "__OTHER__") {
@@ -854,43 +773,40 @@ function showEditTask(taskId){
     const durationVal = document.querySelector('#eDuration').value;
     const duration = parseInt(durationVal, 10);
     if(!durationVal || isNaN(duration) || duration < 1){
-      alert("Please provide an Estimate Completion Time (in minutes).");
+      showToast("Add time in minutes");
       document.querySelector('#eDuration').focus(); return;
     }
 
     const energy = document.querySelector('#eEnergy').value;
-    if(!energy){ alert("Please select an Energy level."); document.querySelector('#eEnergy').focus(); return; }
+    if(!energy){ showToast("Select an energy level"); document.querySelector('#eEnergy').focus(); return; }
 
     const location = (document.querySelector('#eLocation').value || '').trim() || null;
     if (location) addMyLocation(location);
+
+    const dueDate = (document.querySelector('#eDueDate').value || '').trim() || null;
 
     const rawTags = (document.querySelector('#eTags').value || '').split(',').map(s=>s.trim()).filter(Boolean);
     rawTags.forEach(tag => addMyTag(category, tag));
 
     const notes = (document.querySelector('#eNotes').value || '').trim() || null;
 
-    // save back
-    const tasks = getTasks();
-    const idx = tasks.findIndex(x => x.id === taskId);
-    if (idx === -1){ alert("Task not found."); showPromptScreen(); return; }
+    const all = getTasks();
+    const idx = all.findIndex(x => x.id === taskId);
+    if (idx === -1){ showToast("Task not found."); showPromptScreen(); return; }
 
-    tasks[idx] = {
-      ...tasks[idx],
-      title, category, duration, energy, location, tags: rawTags, notes
-    };
-    saveTasks(tasks);
-    alert("Task updated.");
+    all[idx] = { ...all[idx], title, category, duration, energy, location, tags: rawTags, notes, dueDate };
+    saveTasks(all);
+    showToast("Task updated");
     showTasksByCategory(category);
   };
 }
 
-// ---------- VIEW PLATE (DEFAULT PIE) ----------
+// ---------- VIEW PLATE ----------
 function viewTasksChart() {
   currentScreen = "view_chart";
   const root = mountRoot();
   root.appendChild(renderTopBar({ title:"My Plate", onBack: showPromptScreen }));
 
-  // pull tasks and prep counts
   const tasks = getTasks();
   if (!tasks || tasks.length === 0) {
     root.insertAdjacentHTML('beforeend', `
@@ -903,7 +819,6 @@ function viewTasksChart() {
     return;
   }
 
-  // Count tasks by category
   const baseCats = getCategories();
   const counts = {};
   baseCats.forEach(cat => counts[cat] = 0);
@@ -915,13 +830,11 @@ function viewTasksChart() {
   const labels = Object.keys(counts).filter(c => counts[c] > 0);
   const data   = labels.map(c => counts[c]);
 
-  // chart canvas
   root.insertAdjacentHTML('beforeend', `
     <canvas id="taskChart" width="340" height="340"></canvas>
     <div style="margin-top:12px;"></div>
   `);
 
-  // Clear My Plate (ROUTE, don't wipe)
   const clearBtn = document.createElement('button');
   clearBtn.textContent = "Clear My Plate";
   clearBtn.onclick = () => {
@@ -933,7 +846,6 @@ function viewTasksChart() {
   };
   root.appendChild(clearBtn);
 
-  // init chart
   const ctx = $("taskChart").getContext("2d");
   new Chart(ctx, {
     type: "pie",
@@ -969,9 +881,10 @@ function showTasksByCategory(category) {
   tasks.forEach(t=>{
     const card = document.createElement('div');
     card.style.cssText="border:1px solid #ccc;padding:10px;margin:8px 0;border-radius:8px;";
+    const due = t.dueDate ? ` • due ${t.dueDate}` : ``;
     card.innerHTML = `
       <strong>${t.title}</strong><br>
-      ${(t.duration ?? "-")} min • ${(t.energy || "-")} • ${(t.category || "-")}<br>
+      ${(t.duration ?? "-")} min • ${(t.energy || "-")} • ${(t.category || "-")}${due}<br>
       ${t.location ? `@ ${t.location}<br>`:``}
       ${t.tags && t.tags.length ? `Tags: ${t.tags.join(', ')}` : ``}
     `;
@@ -987,9 +900,9 @@ function showTasksByCategory(category) {
     doneBtn.textContent = "Cleared";
     doneBtn.style.marginLeft = '8px';
     doneBtn.onclick = ()=>{
-      completeTask(t.id);         // archives to Trash
+      completeTask(t.id);
       launchConfetti();
-      showTasksByCategory(category); // refresh list
+      showTasksByCategory(category);
     };
 
     actions.appendChild(editBtn);
@@ -999,6 +912,7 @@ function showTasksByCategory(category) {
   });
 }
 
+// ---------- TASK TRASH ----------
 function showTaskTrash(){
   currentScreen = "trash";
   const root = mountRoot();
@@ -1010,7 +924,6 @@ function showTaskTrash(){
     return;
   }
 
-  // Controls
   const actions = document.createElement('div');
   actions.style.margin = '8px 0';
   const clearAll = document.createElement('button');
@@ -1024,14 +937,14 @@ function showTaskTrash(){
   actions.appendChild(clearAll);
   root.appendChild(actions);
 
-  // List
   trash.forEach((t, i)=>{
     const card = document.createElement('div');
     card.style.cssText="border:1px solid #ccc;padding:10px;margin:8px 0;border-radius:8px;";
     const when = new Date(t.completedAt || Date.now()).toLocaleString();
+    const due = t.dueDate ? ` • due ${t.dueDate}` : ``;
     card.innerHTML = `
       <strong>${t.title}</strong><br>
-      ${t.duration ?? 0} min • ${t.energy || "—"} • ${t.category || "—"}<br>
+      ${t.duration ?? 0} min • ${t.energy || "—"} • ${t.category || "—"}${due}<br>
       ${t.location ? `@ ${t.location}<br>` : ``}
       <small>Completed: ${when}</small>
     `;
@@ -1042,16 +955,9 @@ function showTaskTrash(){
     const restore = document.createElement('button');
     restore.textContent = "Restore";
     restore.onclick = ()=>{
-      // put back into active tasks
       const active = getTasks();
-      active.unshift({
-        ...t,
-        // keep same id to avoid duplicates; if you'd prefer a new id:
-        // id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now())
-      });
+      active.unshift({ ...t });
       saveTasks(active);
-
-      // remove from trash
       const remaining = getCompletedTasks().filter((_, idx)=> idx!==i);
       saveCompletedTasks(remaining);
       showTaskTrash();
@@ -1123,7 +1029,6 @@ function suggestTasks() {
 
   const tasks = getTasks();
 
-  // Prompt suggestion
   const quizScores = JSON.parse(localStorage.getItem("quizScores") || "{}");
   const topTags = getTopPromptTags(quizScores);
   const promptSuggestions = getPromptsByTags(topTags);
@@ -1131,7 +1036,6 @@ function suggestTasks() {
     ? promptSuggestions[Math.floor(Math.random() * promptSuggestions.length)].text
     : "Take a breath — even one small step is progress.";
 
-  // Filter across the WHOLE plate (≤ energy, ≤ time if provided)
   _lastCandidates = tasks.filter(t => {
     const okEnergy = ENERGY_RANK[(t.energy || "Medium")] <= ENERGY_RANK[inferredEnergy];
     const okTime = isNaN(time) ? true : ((t.duration ?? 15) <= time);
@@ -1181,9 +1085,10 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
     picks.forEach(t=>{
       const card = document.createElement('div');
       card.style.cssText="border:1px solid #ccc;padding:10px;margin:10px 0;border-radius:10px;";
+      const due = t.dueDate ? ` • due ${t.dueDate}` : ``;
       card.innerHTML = `
         <strong>${t.title}</strong><br>
-        ${(t.duration ?? 0)} min • ${(t.energy || "Medium")} • ${(t.category || "-")}<br>
+        ${(t.duration ?? 0)} min • ${(t.energy || "Medium")} • ${(t.category || "-")}${due}<br>
         ${t.location ? `@ ${t.location}<br>` : ``}
       `;
 
@@ -1203,9 +1108,9 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
       btnDone.textContent = "Cleared";
       btnDone.style.marginLeft = '8px';
       btnDone.onclick = ()=>{
-        completeTask(t.id);       // archives to Trash
+        completeTask(t.id);
         launchConfetti();
-        suggestTasks();           // refresh picks
+        suggestTasks();
       };
 
       actions.appendChild(btnMot);
@@ -1216,7 +1121,6 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
     });
   }
 
-  // Reshuffle + Nav
   const reshuffle = document.createElement('button');
   reshuffle.textContent = "Reshuffle";
   reshuffle.onclick = ()=> renderSuggestionPicks({ mood, inferredEnergy, randomPrompt });
@@ -1233,7 +1137,6 @@ function renderSuggestionPicks({ mood, inferredEnergy, randomPrompt }){
   $("app").appendChild(top);
   $("app").appendChild(container);
 
-  // Save mood history
   const history = loadFromLocal("moodHistory");
   history.push({ mood, timestamp: new Date().toISOString() });
   saveToLocal("moodHistory", history);
@@ -1244,11 +1147,8 @@ function completeTask(taskId){
   const tasks = getTasks();
   const idx = tasks.findIndex(t => t.id === taskId);
   if (idx === -1) return;
-
   const [done] = tasks.splice(idx, 1);
   saveTasks(tasks);
-
-  // move the finished task to the trash
   archiveTask(done);
 }
 
@@ -1273,7 +1173,7 @@ function showSupportScreen() {
   $("app").appendChild(box);
 }
 
-// ---------- GOALS (lightweight) ----------
+// ---------- GOALS ----------
 function showGoals(){
   currentScreen="goals";
   const root = mountRoot();
