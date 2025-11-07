@@ -1,5 +1,5 @@
 // ===============================
-// 🚀 LifePlate App — script.js (Step 1 Updates)
+// 🚀 LifePlate App — script.js 
 // ===============================
 
 // ---------- GLOBAL ----------
@@ -71,7 +71,7 @@ async function loginViaMagicLink() {
   if (!email) return;
   const { error } = await sb.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: window.location.href }
+    options: { emailRedirectTo: "https://lifeplatemvp.netlify.app" }
   });
   if (error) {
     showToast("Login error. Try again.");
