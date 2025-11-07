@@ -53,8 +53,8 @@ function celebrateEmoji(category){
 
 // ============ LOGIN + CLOUD SYNC (Supabase) ============
 // 1) Init client
-const SB_URL = "YOUR_SUPABASE_URL";
-const SB_KEY = "YOUR_SUPABASE_ANON_KEY";
+const SB_URL = "https://zooxdcqedazturrijtej.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpvb3hkY3FlZGF6dHVycmlqdGVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI0NjE5NzIsImV4cCI6MjA3ODAzNzk3Mn0.OLzl_NlXv8ORYJnSxHlK6Tk-LdF4rT6Imp4BNXLd9RQ";
 const sb = window.supabase?.createClient ? window.supabase.createClient(SB_URL, SB_KEY) : null;
 
 // Track auth state
