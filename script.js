@@ -51,6 +51,215 @@ function celebrateEmoji(category){
   setTimeout(()=> el.remove(), 1000);
 }
 
+// ============ LOGIN + CLOUD SYNC (Supabase) ============
+// 1) Init client
+const SB_URL = "YOUR_SUPABASE_URL";
+const SB_KEY = "YOUR_SUPABASE_ANON_KEY";
+const sb = window.supabase?.createClient ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+
+// Track auth state
+let sbUser = null;
+async function getUser() {
+  if (!sb) return null;
+  const { data } = await sb.auth.getUser();
+  sbUser = data?.user || null;
+  return sbUser;
+}
+
+async function loginViaMagicLink() {
+  const email = prompt("Enter your email to get a login link:");
+  if (!email) return;
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.href }
+  });
+  if (error) {
+    showToast("Login error. Try again.");
+  } else {
+    showToast("Check your email for the login link.");
+  }
+}
+
+async function logout() {
+  if (!sb) return;
+  await sb.auth.signOut();
+  sbUser = null;
+  showToast("Logged out");
+  showHomeScreen();
+}
+
+// 2) Merge helpers (latest-wins by updatedAt)
+function nowISO(){ return new Date().toISOString(); }
+function toMinutes(n){ return typeof n === "number" ? n : parseInt(n,10) || null; }
+
+function mergeTasksLocalAndRemote(localArr, remoteArr){
+  const byId = new Map();
+  [...remoteArr, ...localArr].forEach(t=>{
+    if (!t) return;
+    const id = t.id;
+    if (!id) return;
+    const prev = byId.get(id);
+    if (!prev) { byId.set(id, t); return; }
+    const a = new Date(prev.updated_at || prev.updatedAt || 0).getTime();
+    const b = new Date(t.updated_at || t.updatedAt || 0).getTime();
+    byId.set(id, b >= a ? t : prev);
+  });
+  return Array.from(byId.values());
+}
+
+// 3) Pull from cloud → hydrate local
+async function pullFromCloud() {
+  if (!sbUser || !sb) return;
+
+  // tasks
+  const { data: rTasks, error: e1 } = await sb
+    .from("tasks")
+    .select("*")
+    .eq("user_id", sbUser.id);
+  if (!e1 && Array.isArray(rTasks)) {
+    const local = getTasks();
+    const merged = mergeTasksLocalAndRemote(
+      local,
+      rTasks.map(rt => ({
+        id: rt.id,
+        title: rt.title,
+        category: rt.category,
+        duration: toMinutes(rt.duration),
+        energy: rt.energy,
+        location: rt.location,
+        tags: Array.isArray(rt.tags) ? rt.tags : [],
+        notes: rt.notes,
+        dueDate: rt.due_date || null,
+        createdAt: rt.created_at,
+        updatedAt: rt.updated_at
+      }))
+    );
+    saveTasks(merged);
+  }
+
+  // completions (Trash)
+  const { data: rComp, error: e2 } = await sb
+    .from("completions")
+    .select("*")
+    .eq("user_id", sbUser.id)
+    .order("completed_at", { ascending:false });
+
+  if (!e2 && Array.isArray(rComp)) {
+    const mapped = rComp.map(c => ({
+      id: c.task_id || c.id,
+      title: c.title,
+      category: c.category,
+      duration: toMinutes(c.duration),
+      energy: c.energy || null,
+      location: c.location || null,
+      tags: Array.isArray(c.tags) ? c.tags : [],
+      notes: c.notes || null,
+      dueDate: c.due_date || null,
+      emoji: c.emoji || (categoryToEmoji ? categoryToEmoji(c.category) : "✅"),
+      completedAt: c.completed_at ? new Date(c.completed_at).getTime() : Date.now()
+    }));
+    saveCompletedTasks(mapped);
+  }
+
+  showToast("Synced from cloud");
+}
+
+// 4) Push local changes → cloud (called inside our wrappers below)
+async function pushTasksToCloud(tasks){
+  if (!sbUser || !sb) return;
+  // Upsert each task (small beta volume = fine)
+  const rows = tasks.map(t => ({
+    id: t.id,
+    user_id: sbUser.id,
+    title: t.title,
+    category: t.category,
+    duration: toMinutes(t.duration),
+    energy: t.energy,
+    location: t.location,
+    tags: t.tags || [],
+    notes: t.notes || null,
+    due_date: t.dueDate || null,
+    created_at: t.createdAt ? new Date(t.createdAt).toISOString() : nowISO(),
+    updated_at: t.updatedAt ? new Date(t.updatedAt).toISOString() : nowISO()
+  }));
+  await sb.from("tasks").upsert(rows, { onConflict: "id" });
+}
+
+async function insertCompletionToCloud(entry){
+  if (!sbUser || !sb) return;
+  await sb.from("completions").insert({
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    user_id: sbUser.id,
+    task_id: entry.id || null,
+    title: entry.title,
+    category: entry.category,
+    emoji: entry.emoji || (categoryToEmoji ? categoryToEmoji(entry.category) : "✅"),
+    duration: toMinutes(entry.duration),
+    energy: entry.energy || null,
+    location: entry.location || null,
+    tags: entry.tags || [],
+    notes: entry.notes || null,
+    due_date: entry.dueDate || null,
+    completed_at: new Date(entry.completedAt || Date.now()).toISOString()
+  });
+}
+
+// 5) Wrap existing local save functions to also sync when logged in
+const _saveTasksLocalOnly = saveTasks;     // keep original
+saveTasks = function(tasks){
+  // add/update timestamps locally
+  const stamped = (tasks || []).map(t => ({ ...t, updatedAt: t.updatedAt || nowISO() }));
+  _saveTasksLocalOnly(stamped);
+  // push to cloud (fire-and-forget)
+  pushTasksToCloud(stamped).catch(()=>{});
+};
+
+const _archiveTaskLocalOnly = archiveTask; // keep original
+archiveTask = function(task){
+  _archiveTaskLocalOnly(task);
+  // also push completion
+  const last = getCompletedTasks()[0];
+  if (last) insertCompletionToCloud(last).catch(()=>{});
+};
+
+// 6) Add Login/Logout buttons to Home (we’ll hook into showHomeScreen below)
+function renderAuthButtons(container){
+  if (!sb) return; // no client loaded
+  const row = document.createElement('div');
+  row.style.cssText = "margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;";
+
+  const status = document.createElement('div');
+  status.style.cssText = "font-size:13px; color:#666;";
+  status.textContent = sbUser ? `Signed in: ${sbUser.email || sbUser.id}` : "Not signed in";
+
+  const loginBtn = document.createElement('button');
+  loginBtn.textContent = sbUser ? "Log out" : "Log in";
+  loginBtn.onclick = sbUser ? logout : loginViaMagicLink;
+
+  const syncBtn = document.createElement('button');
+  syncBtn.textContent = "Sync Now";
+  syncBtn.onclick = pullFromCloud;
+
+  row.appendChild(status);
+  row.appendChild(loginBtn);
+  row.appendChild(syncBtn);
+  container.appendChild(row);
+}
+
+// 7) On load: get user + try initial sync (non-blocking)
+document.addEventListener("DOMContentLoaded", async () => {
+  if (!sb) return;
+  await getUser();
+  if (sbUser) pullFromCloud().catch(()=>{});
+  // keep listening for future sign-ins via magic link
+  sb.auth.onAuthStateChange(async (_event, session) => {
+    sbUser = session?.user || null;
+    showToast(sbUser ? "Signed in" : "Signed out");
+    if (sbUser) { await pullFromCloud(); }
+    showHomeScreen();
+  });
+});
+
 // ---------- TOAST (auto-dismiss) ----------
 (function ensureToastStyles(){
   if (document.getElementById('lp-toast-styles')) return;
@@ -351,6 +560,10 @@ function showHomeScreen() {
     </div>
   `;
   root.appendChild(wrap);
+
+  if (typeof renderAuthButtons === "function") {
+    renderAuthButtons(wrap);
+  }
 
   $("btnStart").onclick = () => {
     if (localStorage.getItem("onboarded") === "true") showPromptScreen();
